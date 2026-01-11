@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 
 	"github.com/beevik/etree"
 	"github.com/jaycee1285/labwcchanger-tui/internal/theme"
@@ -164,15 +163,3 @@ func run(name string, args ...string) error {
 }
 
 var ErrKittyThemeNotFound = errors.New("kitty theme file not found")
-
-func backupFile(p string) (string, error) {
-	if _, err := os.Stat(p); err != nil {
-		return "", nil
-	}
-	bak := fmt.Sprintf("%s.bak.%d", p, time.Now().UnixMilli())
-	in, err := os.ReadFile(p)
-	if err != nil {
-		return "", err
-	}
-	return bak, os.WriteFile(bak, in, 0o644)
-}

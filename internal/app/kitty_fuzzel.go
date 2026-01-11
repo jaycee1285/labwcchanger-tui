@@ -107,8 +107,6 @@ func updateFuzzelColors(selectedKittyTheme string) error {
 	base0D := strings.ToLower(firstNonEmpty(colors["color4"], colors["active_border_color"], colors["color12"], strings.ToUpper(base05)))
 
 	fuzzelPath := theme.FuzzelIniPath()
-	// Backup if exists (Flutter does this).
-	_, _ = backupFile(fuzzelPath)
 
 	if err := os.MkdirAll(filepath.Dir(fuzzelPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir fuzzel dir: %w", err)
