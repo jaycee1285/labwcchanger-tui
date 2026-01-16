@@ -14,6 +14,12 @@ import (
 	"github.com/jaycee1285/labwcchanger-tui/internal/theme"
 )
 
+// Layout constraints
+const (
+	maxWidth  = 70
+	maxHeight = 30
+)
+
 type tab int
 
 const (
@@ -23,6 +29,7 @@ const (
 	tabLabwc
 	tabKitty
 	tabWall
+	tabCount
 )
 
 var tabNames = []string{"Style", "GTK", "Icons", "LabWC", "Kitty", "Walls"}
@@ -33,34 +40,33 @@ func (i item) Title() string       { return i.title }
 func (i item) Description() string { return "" }
 func (i item) FilterValue() string { return i.title }
 
+// Compact delegate for items inside expanded panels
 type compactDelegate struct {
-  normal  lipgloss.Style
-  focused lipgloss.Style
+	normal  lipgloss.Style
+	focused lipgloss.Style
 }
 
 func newCompactDelegate() compactDelegate {
-  return compactDelegate{
-    normal:  lipgloss.NewStyle(),
-    focused: lipgloss.NewStyle().Reverse(true).Bold(true),
-  }
+	return compactDelegate{
+		normal:  lipgloss.NewStyle(),
+		focused: lipgloss.NewStyle().Bold(true).Reverse(true),
+	}
 }
 
-func (d compactDelegate) Height() int  { return 1 }
-func (d compactDelegate) Spacing() int { return 0 }
-func (d compactDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
+func (d compactDelegate) Height() int                                 { return 1 }
+func (d compactDelegate) Spacing() int                                { return 0 }
+func (d compactDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd   { return nil }
 
 func (d compactDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
-  it, _ := listItem.(item)
-  prefix := "• "
-  line := prefix + it.title
-
-  if index == m.Index() {
-    fmt.Fprint(w, d.focused.Render(line))
-    return
-  }
-  fmt.Fprint(w, d.normal.Render(line))
+	it, _ := listItem.(item)
+	if index == m.Index() {
+		line := "  ▸ " + it.title
+		fmt.Fprint(w, d.focused.Render(line))
+		return
+	}
+	line := "    " + it.title
+	fmt.Fprint(w, d.normal.Render(line))
 }
-
 
 type dataLoadedMsg struct {
 	openbox []string
@@ -75,11 +81,13 @@ type dataLoadedMsg struct {
 type applyDoneMsg struct{ err error }
 
 type Model struct {
-	active  tab
-	lists   map[tab]list.Model
-	spinner spinner.Model
-	width   int
-	height  int
+	active    tab       // Currently focused panel (title row)
+	expanded  tab       // Which panel is expanded (-1 = none)
+	inList    bool      // True when navigating inside an expanded list
+	lists     map[tab]list.Model
+	spinner   spinner.Model
+	width     int
+	height    int
 
 	openbox []string
 	gtk     []string
@@ -91,27 +99,32 @@ type Model struct {
 	selected app.Selections
 	status   string
 	applying bool
+	loaded   bool
 }
 
 func New() Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Line
 	m := Model{
-		active:  tabGtk,
-		lists:   map[tab]list.Model{},
-		spinner: sp,
-		status:  "Loading…",
+		active:   tabStyle,
+		expanded: -1, // Nothing expanded initially
+		inList:   false,
+		lists:    map[tab]list.Model{},
+		spinner:  sp,
+		status:   "Loading…",
 	}
 	del := newCompactDelegate()
 
-for t := tabStyle; t <= tabWall; t++ {
-  l := list.New([]list.Item{}, del, 0, 0)
-  l.SetShowStatusBar(false)
-  l.SetFilteringEnabled(true)
-  l.SetShowHelp(false)
-  l.SetShowTitle(false) // <- prevents the “second title”
-  m.lists[t] = l
-}
+	for t := tabStyle; t < tabCount; t++ {
+		l := list.New([]list.Item{}, del, maxWidth-6, 8)
+		l.SetShowStatusBar(false)
+		l.SetFilteringEnabled(true)
+		l.SetShowHelp(false)
+		l.SetShowTitle(false)
+		l.SetShowPagination(true)
+		l.KeyMap.Quit.SetEnabled(false) // We handle quit ourselves
+		m.lists[t] = l
+	}
 	return m
 }
 
@@ -141,15 +154,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
+		m.width = min(msg.Width, maxWidth)
+		m.height = min(msg.Height, maxHeight)
 		m = m.resizeLists()
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.applying {
-			m.spinner, cmd = m.spinner.Update(msg)
-			return m, cmd
-		}
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 
@@ -159,7 +169,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selected.GtkTheme = msg.current.GtkTheme
 		m.selected.IconTheme = msg.current.IconTheme
 		m.selected.OpenboxTheme = msg.current.OpenboxTheme
-		m.status = "Loaded. Tab/Shift+Tab to switch. Enter to select. A to apply. Q to quit."
+		m.status = "Ready"
+		m.loaded = true
 
 		m.lists[tabStyle] = rebuildList(m.lists[tabStyle], msg.styles)
 		m.lists[tabGtk] = rebuildList(m.lists[tabGtk], msg.gtk)
@@ -167,7 +178,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lists[tabLabwc] = rebuildList(m.lists[tabLabwc], msg.openbox)
 		m.lists[tabKitty] = rebuildList(m.lists[tabKitty], msg.kitty)
 		m.lists[tabWall] = rebuildList(m.lists[tabWall], msg.walls)
-		// try to position cursors on current selections
 		m = m.syncCursorToSelection()
 		return m, nil
 
@@ -176,24 +186,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.status = "Apply failed: " + firstLine(msg.err.Error())
 		} else {
-			m.status = "Applied."
+			m.status = "Applied successfully!"
 		}
 		return m, nil
 
 	case tea.KeyMsg:
 		k := msg.String()
+
+		// Global keys
 		switch k {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "tab":
-			m.active = (m.active + 1) % tab(len(tabNames))
-			return m, nil
-		case "shift+tab":
-			m.active = (m.active - 1)
-			if m.active < 0 {
-				m.active = tab(len(tabNames) - 1)
-			}
-			return m, nil
 		case "a":
 			if m.applying {
 				return m, nil
@@ -201,16 +204,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applying = true
 			m.status = "Applying…"
 			return m, tea.Batch(m.spinner.Tick, applyCmd(m.selected))
-		case "enter":
-			m = m.selectCurrentItem()
-			return m, nil
+		}
+
+		// Navigation depends on whether we're in a list or at panel titles
+		if m.inList && m.expanded >= 0 {
+			switch k {
+			case "left", "esc":
+				// Collapse and return to panel navigation
+				m.inList = false
+				return m, nil
+			case "enter":
+				m = m.selectCurrentItem()
+				return m, nil
+			case "up", "down", "j", "k", "pgup", "pgdown", "home", "end":
+				// Forward to list
+				l := m.lists[m.expanded]
+				l, cmd = l.Update(msg)
+				m.lists[m.expanded] = l
+				return m, cmd
+			default:
+				// Forward filtering keys to list
+				l := m.lists[m.expanded]
+				l, cmd = l.Update(msg)
+				m.lists[m.expanded] = l
+				return m, cmd
+			}
+		} else {
+			// Navigating panel titles
+			switch k {
+			case "up", "k":
+				if m.active > 0 {
+					m.active--
+				}
+				return m, nil
+			case "down", "j":
+				if m.active < tabCount-1 {
+					m.active++
+				}
+				return m, nil
+			case "right", "enter", "l":
+				// Expand the active panel and enter list mode
+				m.expanded = m.active
+				m.inList = true
+				return m, nil
+			case "left", "h":
+				// Collapse if this panel is expanded
+				if m.expanded == m.active {
+					m.expanded = -1
+				}
+				return m, nil
+			}
 		}
 	}
 
-	// forward to active list for navigation/filtering
-	l := m.lists[m.active]
-	l, cmd = l.Update(msg)
-	m.lists[m.active] = l
 	return m, cmd
 }
 
@@ -225,22 +271,23 @@ func rebuildList(l list.Model, items []string) list.Model {
 
 func applyCmd(sel app.Selections) tea.Cmd {
 	return func() tea.Msg {
-		// Skip step 7 (labwc-gtktheme.py) by design.
 		err := app.Apply(sel)
 		return applyDoneMsg{err: err}
 	}
 }
 
 func (m Model) selectCurrentItem() Model {
-	l := m.lists[m.active]
+	if m.expanded < 0 {
+		return m
+	}
+	l := m.lists[m.expanded]
 	it, ok := l.SelectedItem().(item)
 	if !ok {
 		return m
 	}
 
-	switch m.active {
+	switch m.expanded {
 	case tabStyle:
-		// Apply style heuristics to fill selections.
 		ob, gtk, icon, kitty, wall := theme.ApplyStyle(it.title, m.openbox, m.gtk, m.icons, m.kitty, m.walls)
 		if ob != "" {
 			m.selected.OpenboxTheme = ob
@@ -257,7 +304,7 @@ func (m Model) selectCurrentItem() Model {
 		if wall != "" {
 			m.selected.Wallpaper = wall
 		}
-		m.status = fmt.Sprintf("Style set: %s", it.title)
+		m.status = fmt.Sprintf("Style applied: %s", it.title)
 		m = m.syncCursorToSelection()
 	case tabGtk:
 		m.selected.GtkTheme = it.title
@@ -300,124 +347,213 @@ func moveCursorTo(l list.Model, title string) list.Model {
 	return l
 }
 
-func (m Model) View() string {
-	info := renderSelections(m.selected)
-	body := m.renderDashboard()
-	status := m.status
-	if m.applying {
-		status = m.spinner.View() + " " + status
-	}
-
-	footer := renderFooter()
-	return strings.Join([]string{info, body, footer, "", status}, "\n")
-}
-
-var (
-  infoStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-  panelFocused  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("7")).Padding(0, 0)
-  panelInactive = lipgloss.NewStyle().Border(lipgloss.HiddenBorder()).Padding(0, 0)
-  buttonStyle   = lipgloss.NewStyle().Bold(true)
-
-  titleActive   = lipgloss.NewStyle().Reverse(true).Bold(true).Padding(0, 0)
-  titleInactive = lipgloss.NewStyle().Padding(0, 0)
-)
-
-
-func renderFooter() string {
-	return buttonStyle.Render("[A] Apply   [Tab] Next Panel   [Enter] Select   [/] Filter   [Q] Quit")
-}
-
-func renderSelections(sel app.Selections) string {
-	lines := []string{
-		fmt.Sprintf("Selected → GTK: %s | Icons: %s | LabWC: %s | Kitty: %s | Wall: %s",
-			emptyDash(sel.GtkTheme),
-			emptyDash(sel.IconTheme),
-			emptyDash(sel.OpenboxTheme),
-			emptyDash(sel.KittyTheme),
-			emptyDash(sel.Wallpaper),
-		),
-		"All panels are visible; Tab changes focus. Apply restarts LabWC and Waybar.",
-	}
-	return infoStyle.Render(strings.Join(lines, "\n"))
-}
-
 func (m Model) resizeLists() Model {
-	// Two columns, three panels each. Aim for ~6–7 rows of items per panel.
-	w := m.width
-	h := m.height
-	if w <= 0 || h <= 0 {
+	if m.width <= 0 || m.height <= 0 {
 		return m
 	}
-
-	// Reserve: 2 info lines + footer + status spacer.
-	reserved := 5
-	available := h - reserved
-	if available < 12 {
-		available = 12
+	// Calculate available height for expanded list
+	// Header (title + border) + selections (6 lines) + panel titles + status
+	listHeight := m.height - 16
+	if listHeight < 5 {
+		listHeight = 5
 	}
-	panelH := available/3 - 1
-	if panelH > 9 {
-		panelH = 9
-	}
-	if panelH < 7 {
-		panelH = 7
+	if listHeight > 12 {
+		listHeight = 12
 	}
 
-	colW := (w - 3) / 2
-	if colW < 30 {
-		colW = w - 2
-	}
-	listW := colW - 4
-	if listW < 20 {
-		listW = colW - 2
+	listWidth := m.width - 6
+	if listWidth < 30 {
+		listWidth = 30
 	}
 
 	for t, l := range m.lists {
-		l.SetSize(listW, panelH)
-		// compact defaults
-		l.SetShowStatusBar(false)
-		l.SetShowHelp(false)
+		l.SetSize(listWidth, listHeight)
 		m.lists[t] = l
 	}
 	return m
 }
 
-func (m Model) renderDashboard() string {
-	left := lipgloss.JoinVertical(
-		lipgloss.Left,
-		m.renderPanel(tabStyle),
-		m.renderPanel(tabGtk),
-		m.renderPanel(tabIcons),
-	)
-	right := lipgloss.JoinVertical(
-		lipgloss.Left,
-		m.renderPanel(tabLabwc),
-		m.renderPanel(tabKitty),
-		m.renderPanel(tabWall),
-	)
+// ─────────────────────────────────────────────────────────────────────────────
+// View rendering
+// ─────────────────────────────────────────────────────────────────────────────
 
-	// If terminal is narrow, stack columns vertically.
-	if m.width > 0 && m.width < 100 {
-		return lipgloss.JoinVertical(lipgloss.Left, left, right)
+var (
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("62")).
+			Padding(0, 1).
+			MarginBottom(1)
+
+	boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62")).
+			Padding(0, 1)
+
+	panelTitleFocused = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("0")).
+				Background(lipgloss.Color("7"))
+
+	panelTitleNormal = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("7"))
+
+	panelTitleExpanded = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("10"))
+
+	selLabelStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8")).
+			Width(10)
+
+	selValueStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("15"))
+
+	statusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("11")).
+			Italic(true)
+
+	dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+)
+
+func (m Model) View() string {
+	var b strings.Builder
+
+	// Title
+	title := titleStyle.Render("LabWC Theme Changer")
+	b.WriteString(title + "\n")
+
+	// Current selections (vertical, one per line)
+	b.WriteString(m.renderSelections())
+	b.WriteString("\n")
+
+	// Panel list (collapsible)
+	b.WriteString(m.renderPanels())
+	b.WriteString("\n")
+
+	// Help commands (vertical)
+	b.WriteString(m.renderHelp())
+	b.WriteString("\n")
+
+	// Status line
+	status := m.status
+	if m.applying {
+		status = m.spinner.View() + " " + status
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	b.WriteString(statusStyle.Render(status))
+
+	// Wrap everything in a constrained box
+	content := b.String()
+	return lipgloss.NewStyle().
+		Width(m.width).
+		MaxWidth(maxWidth).
+		Render(content)
 }
 
-func (m Model) renderPanel(t tab) string {
-	l := m.lists[t]
-	header := tabNames[int(t)]
+func (m Model) renderSelections() string {
+	var lines []string
+	lines = append(lines, dimStyle.Render("─── Current Selection ───"))
 
-	// Fill the full panel width so the focused inverted title is easy to spot.
-	headerWidth := l.Width() + 2
-
-	if m.active == t {
-		view := titleActive.Width(headerWidth).Render(header) + "\n" + l.View()
-		return panelFocused.Render(view)
+	selections := []struct {
+		label string
+		value string
+	}{
+		{"GTK", m.selected.GtkTheme},
+		{"Icons", m.selected.IconTheme},
+		{"LabWC", m.selected.OpenboxTheme},
+		{"Kitty", m.selected.KittyTheme},
+		{"Wallpaper", m.selected.Wallpaper},
 	}
-	view := titleInactive.Width(headerWidth).Render(header) + "\n" + l.View()
-	return panelInactive.Render(view)
+
+	for _, sel := range selections {
+		label := selLabelStyle.Render(sel.label + ":")
+		value := selValueStyle.Render(emptyDash(sel.value))
+		lines = append(lines, label+value)
+	}
+
+	return strings.Join(lines, "\n")
 }
 
+func (m Model) renderPanels() string {
+	var lines []string
+	lines = append(lines, dimStyle.Render("─── Theme Panels ───"))
+
+	for t := tabStyle; t < tabCount; t++ {
+		// Determine indicator and style
+		var indicator string
+		var style lipgloss.Style
+
+		isExpanded := m.expanded == t
+		isFocused := m.active == t
+
+		if isExpanded {
+			indicator = "▼ "
+			style = panelTitleExpanded
+		} else {
+			indicator = "▶ "
+			style = panelTitleNormal
+		}
+
+		// Add focus marker
+		prefix := "  "
+		if isFocused && !m.inList {
+			prefix = "› "
+			style = panelTitleFocused
+		}
+
+		// Item count
+		count := len(m.lists[t].Items())
+		countStr := dimStyle.Render(fmt.Sprintf(" (%d)", count))
+
+		line := prefix + indicator + style.Render(tabNames[t]) + countStr
+		lines = append(lines, line)
+
+		// If this panel is expanded, show its list
+		if isExpanded {
+			listView := m.lists[t].View()
+			// Indent the list
+			indented := indentLines(listView, "  ")
+			lines = append(lines, indented)
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+var helpKeyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+var helpDescStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+
+func (m Model) renderHelp() string {
+	var lines []string
+	lines = append(lines, dimStyle.Render("─── Commands ───"))
+
+	commands := []struct {
+		key  string
+		desc string
+	}{
+		{"↑ ↓", "Navigate panels"},
+		{"→ / Enter", "Expand panel"},
+		{"← / Esc", "Collapse panel"},
+		{"/", "Filter items"},
+		{"A", "Apply changes"},
+		{"Q", "Quit"},
+	}
+
+	for _, cmd := range commands {
+		line := helpKeyStyle.Render(fmt.Sprintf("%-10s", cmd.key)) + helpDescStyle.Render(cmd.desc)
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func indentLines(s string, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
+}
 
 func emptyDash(s string) string {
 	if strings.TrimSpace(s) == "" {
@@ -432,4 +568,11 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
