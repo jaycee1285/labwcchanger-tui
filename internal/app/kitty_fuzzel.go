@@ -36,8 +36,9 @@ func resolveKittyThemeFile(themeName string) (string, error) {
 }
 
 func applyKittyTheme(themeName string) error {
-	// `kitten themes` expects the theme NAME, not the file path.
-	// Your picker may include ".conf"; Kitty generally wants the base name.
+	// `kitten themes` expects the theme NAME from kitty's registry,
+	// not the filename. Theme files may use underscores in filename
+	// but the actual theme name (in "# Theme:" comment) has spaces.
 	name := strings.TrimSpace(themeName)
 	name = strings.TrimSuffix(name, filepath.Ext(name)) // drops .conf if present
 
@@ -45,7 +46,42 @@ func applyKittyTheme(themeName string) error {
 		return nil
 	}
 
+	// Try to get the actual theme name from the file content
+	actualName := getKittyThemeName(name)
+	if actualName != "" {
+		name = actualName
+	}
+
 	return run("kitten", "themes", "--reload-in=all", name)
+}
+
+// getKittyThemeName reads the kitty theme file and extracts the actual theme name
+// from the "# Theme: <name>" or "## name: <name>" comment line.
+func getKittyThemeName(themeName string) string {
+	p, err := resolveKittyThemeFile(themeName)
+	if err != nil {
+		return ""
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	content := string(b)
+
+	// Try "# Theme: <name>" format first (common in Gogh-generated themes)
+	re := regexp.MustCompile(`(?m)^#\s*Theme:\s*(.+)$`)
+	m := re.FindStringSubmatch(content)
+	if len(m) == 2 {
+		return strings.TrimSpace(m[1])
+	}
+
+	// Try "## name: <name>" format (kitty's standard metadata format)
+	name := parseKittyMeta(content, "name")
+	if name != "" {
+		return name
+	}
+
+	return ""
 }
 
 func parseKittyTheme(content string) map[string]string {

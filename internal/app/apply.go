@@ -108,11 +108,57 @@ func updateGSettings(sel Selections) error {
 		if err := run("gsettings", "set", "org.gnome.desktop.interface", "gtk-theme", sel.GtkTheme); err != nil {
 			return err
 		}
+		// Also update GTK-4.0 settings.ini
+		if err := updateGtk4Settings(sel.GtkTheme); err != nil {
+			// Don't fail if GTK-4.0 update fails, just continue
+			_ = err
+		}
 	}
 	if sel.IconTheme != "" {
 		if err := run("gsettings", "set", "org.gnome.desktop.interface", "icon-theme", sel.IconTheme); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func updateGtk4Settings(themeName string) error {
+	settingsPath := theme.Gtk4SettingsPath()
+	f, err := os.Open(settingsPath)
+	if err != nil {
+		return nil // File doesn't exist, nothing to update
+	}
+	defer f.Close()
+
+	var out bytes.Buffer
+	s := bufio.NewScanner(f)
+	foundTheme := false
+	for s.Scan() {
+		line := s.Text()
+		if len(line) >= 15 && line[:15] == "gtk-theme-name=" {
+			out.WriteString("gtk-theme-name=" + themeName)
+			out.WriteByte('\n')
+			foundTheme = true
+		} else {
+			out.WriteString(line)
+			out.WriteByte('\n')
+		}
+	}
+	if err := s.Err(); err != nil {
+		return fmt.Errorf("read gtk-4.0 settings: %w", err)
+	}
+	// If gtk-theme-name wasn't found, add it after [Settings]
+	if !foundTheme {
+		content := out.String()
+		if idx := bytes.Index([]byte(content), []byte("[Settings]\n")); idx >= 0 {
+			insertPos := idx + len("[Settings]\n")
+			newContent := content[:insertPos] + "gtk-theme-name=" + themeName + "\n" + content[insertPos:]
+			out.Reset()
+			out.WriteString(newContent)
+		}
+	}
+	if err := os.WriteFile(settingsPath, out.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("write gtk-4.0 settings: %w", err)
 	}
 	return nil
 }

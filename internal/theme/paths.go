@@ -19,7 +19,14 @@ func ThemeDirs() []string {
 		filepath.Join(h, ".local/share/themes"),
 		"/run/current-system/sw/share/themes",
 		filepath.Join(h, ".nix-profile/share/themes"),
+		// Home-manager profile path (NixOS)
+		filepath.Join(h, ".local/state/home-manager/gcroots/current-home/home-path/share/themes"),
 	}
+}
+
+func Gtk4SettingsPath() string {
+	h := HomeDir()
+	return filepath.Join(h, ".config/gtk-4.0/settings.ini")
 }
 
 func IconDirs() []string {
